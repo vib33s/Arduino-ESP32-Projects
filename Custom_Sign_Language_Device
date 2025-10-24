@@ -1,0 +1,288 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <MPU6050.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+
+const char* ssid = "MyOptimum 785a70";
+const char* password = "1451-jade-80";
+WebServer server(80);
+
+String webDetectedWord = "None";
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+const int potPin = 35;
+const int buttonNext = 32;
+const int buttonDone = 27;
+
+const int ledPin = 23;
+const int buzzerPin = 5;
+
+char letters[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ ";
+String currentWord = "";
+
+MPU6050 mpu;
+
+const int SAMPLE_HZ = 50;
+const unsigned long SAMPLE_DT_MS = 1000 / SAMPLE_HZ;
+const unsigned long RECORD_MS = 2000;
+const int RECORD_SAMPLES = (RECORD_MS / SAMPLE_DT_MS);
+
+const int MAX_WORDS = 10;
+
+String savedWords[MAX_WORDS];
+float tmpl[MAX_WORDS][RECORD_SAMPLES];
+int tmplLen[MAX_WORDS];
+int numSaved = 0;
+
+const int BUF_SAMPLES = RECORD_SAMPLES * 3;
+float buf[BUF_SAMPLES];
+int bufHead = 0;
+int bufCount = 0;
+
+unsigned long lastSampleMs = 0;
+unsigned long lastDetectMs = 0;
+const unsigned long DETECT_EVERY_MS = 20;
+
+const float MATCH_THRESHOLD = 0.3;
+unsigned long lastTriggerMs = 0;
+const unsigned long TRIGGER_REFRACTORY_MS = 1000;
+String lastTriggeredWord = "";
+
+int lastNextState = HIGH;
+int lastDoneState = HIGH;
+
+static inline float mag3(int16_t x, int16_t y, int16_t z) {
+  return sqrtf((float)x * x + (float)y * y + (float)z * z);
+}
+
+void sampleMPUAndPush() {
+  int16_t ax, ay, az;
+  mpu.getAcceleration(&ax, &ay, &az);
+  float m = mag3(ax, ay, az);
+  buf[bufHead] = m;
+  bufHead = (bufHead + 1) % BUF_SAMPLES;
+  if (bufCount < BUF_SAMPLES) bufCount++;
+}
+
+void normalize(float *x, int n) {
+  if (n <= 1) return;
+  double sum = 0.0;
+  for (int i = 0; i < n; i++) sum += x[i];
+  double mean = sum / n;
+  double var = 0.0;
+  for (int i = 0; i < n; i++) {
+    double d = x[i] - mean;
+    var += d * d;
+  }
+  double stdv = sqrt(var / (n - 1));
+  if (stdv < 1e-6) stdv = 1.0;
+  for (int i = 0; i < n; i++) x[i] = (x[i] - mean) / stdv;
+}
+
+float ncc(const float *a, const float *b, int n) {
+  double dot = 0.0;
+  for (int i = 0; i < n; i++) dot += (double)a[i] * b[i];
+  return (float)(dot / n);
+}
+
+void readWindowFromBuffer(int startIndexFromOldest, int len, float *tmp) {
+  int oldest = (bufHead - bufCount + BUF_SAMPLES) % BUF_SAMPLES;
+  int start = (oldest + startIndexFromOldest) % BUF_SAMPLES;
+  for (int i = 0; i < len; i++) tmp[i] = buf[(start + i) % BUF_SAMPLES];
+}
+
+
+void detectGestures() {
+  if (numSaved == 0 || bufCount < RECORD_SAMPLES) return;
+  if (millis() - lastTriggerMs < TRIGGER_REFRACTORY_MS) return;
+
+  float window[RECORD_SAMPLES];
+  readWindowFromBuffer(bufCount - RECORD_SAMPLES, RECORD_SAMPLES, window);
+  normalize(window, RECORD_SAMPLES);
+
+  for (int i = 0; i < numSaved; i++) {
+    float tmpWindow[RECORD_SAMPLES];
+    memcpy(tmpWindow, tmpl[i], RECORD_SAMPLES * sizeof(float));
+    normalize(tmpWindow, RECORD_SAMPLES);
+
+    float corr = ncc(window, tmpWindow, RECORD_SAMPLES);
+    Serial.print("Word: "); Serial.print(savedWords[i]); Serial.print(" Corr: "); Serial.println(corr);
+
+    if (corr >= MATCH_THRESHOLD) {
+      lastTriggerMs = millis();
+      lastTriggeredWord = savedWords[i];
+      webDetectedWord = savedWords[i];  
+
+      digitalWrite(ledPin, HIGH);
+      digitalWrite(buzzerPin, HIGH);
+
+    
+      delay(200);
+
+     
+      digitalWrite(ledPin, LOW);
+      digitalWrite(buzzerPin, LOW);
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(savedWords[i]);
+      lcd.setCursor(0, 1);
+      lcd.print("Detected!");
+      break;
+    }
+  }
+}
+
+void handleRoot() {
+  String html = "<!DOCTYPE html><html><head><meta http-equiv='refresh' content='1'>";
+  html += "<style>body{font-family:sans-serif;text-align:center;margin-top:50px;}</style></head><body>";
+  html += "<h1>Last Detected Word:</h1>";
+  html += "<h2 style='color:blue;'>" + webDetectedWord + "</h2>";
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+
+  lcd.init();
+  lcd.backlight();
+
+  pinMode(buttonNext, INPUT_PULLUP);
+  pinMode(buttonDone, INPUT_PULLUP);
+
+  pinMode(ledPin, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+  digitalWrite(ledPin, LOW);
+  digitalWrite(buzzerPin, LOW);
+
+  mpu.initialize();
+  if (!mpu.testConnection()) {
+    Serial.println("MPU6050 connection failed");
+    while (1) {}
+  }
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Connecting WiFi");
+  lcd.setCursor(0, 1);
+  lcd.print(ssid);
+
+  WiFi.begin(ssid, password);
+
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 10000) { // 10s timeout
+    delay(500);
+    lcd.setCursor(0, 0);
+    lcd.print("Connecting.   ");
+    delay(500);
+    lcd.setCursor(0, 0);
+    lcd.print("Connecting..  ");
+    delay(500);
+    lcd.setCursor(0, 0);
+    lcd.print("Connecting... ");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Connected");
+    lcd.setCursor(0, 1);
+    lcd.print(WiFi.localIP());
+    delay(1500);
+  } else {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Failed");
+    delay(1500);
+  }
+
+
+  // Start server
+  server.on("/", handleRoot);
+  server.begin();
+  Serial.println("Web server started");
+}
+
+void loop() {
+  server.handleClient();  // Handle web requests
+
+  unsigned long now = millis();
+  if (now - lastSampleMs >= SAMPLE_DT_MS) {
+    lastSampleMs = now;
+    sampleMPUAndPush();
+  }
+
+  int potValue = analogRead(potPin);
+  int letterIndex = map(potValue, 0, 4095, 0, sizeof(letters) - 2);
+
+  lcd.setCursor(0, 1);
+  String line = currentWord + "_";
+  if (line.length() > 16) line = line.substring(line.length() - 16);
+  lcd.print("                ");
+  lcd.setCursor(0, 1);
+  lcd.print(line);
+  lcd.setCursor(15, 1);
+  lcd.print(letters[letterIndex]);
+
+  bool nextPressed = (digitalRead(buttonNext) == LOW);
+  bool donePressed = (digitalRead(buttonDone) == LOW);
+
+  if (nextPressed && lastNextState == HIGH) currentWord += letters[letterIndex];
+
+  if (donePressed && lastDoneState == HIGH && numSaved < MAX_WORDS) {
+    savedWords[numSaved] = currentWord;
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Speaking:");
+    lcd.setCursor(0, 1);
+    lcd.print(currentWord);
+
+    Serial.println("=== RECORDING GESTURE ===");
+    tmplLen[numSaved] = 0;
+    unsigned long t0 = millis();
+    unsigned long nextSamp = 0;
+    while (millis() - t0 < RECORD_MS && tmplLen[numSaved] < RECORD_SAMPLES) {
+      if (millis() - t0 >= nextSamp) {
+        nextSamp += SAMPLE_DT_MS;
+        int16_t ax, ay, az;
+        mpu.getAcceleration(&ax, &ay, &az);
+        float m = mag3(ax, ay, az);
+        Serial.println(m);
+        tmpl[numSaved][tmplLen[numSaved]++] = m;
+      }
+      yield();
+    }
+
+    if (tmplLen[numSaved] > 10) {
+      normalize(tmpl[numSaved], tmplLen[numSaved]);
+      Serial.print("=== GESTURE RECORDED FOR WORD: "); Serial.println(savedWords[numSaved]);
+      numSaved++;
+    } else {
+      Serial.println("=== RECORDING TOO SHORT ===");
+    }
+
+    currentWord = "";
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Create Word:");
+
+    bufCount = 0;
+    bufHead = 0;
+    lastTriggerMs = millis();
+  }
+
+  if (now - lastDetectMs >= DETECT_EVERY_MS) {
+    lastDetectMs = now;
+    detectGestures();
+  }
+
+  lastNextState = !nextPressed ? HIGH : LOW;
+  lastDoneState = !donePressed ? HIGH : LOW;
+}
