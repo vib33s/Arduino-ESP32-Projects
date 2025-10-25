@@ -1,0 +1,196 @@
+#include <Wire.h>
+#include <LiquidCrystal.h>
+#include <MPU9250_asukiaaa.h>
+#include <Servo.h> 
+
+// LCD: RS, E, D4, D5, D6, D7
+LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
+
+MPU9250_asukiaaa mySensor;
+
+#define buzzer 13
+#define led 7
+#define buttonPin 10
+#define servoPin 6 
+
+#define TRIG_PIN 9
+#define ECHO_PIN 10
+
+bool printDetectedOnce = true;
+
+long duration;
+int distance;
+int previousDistance = 0;
+
+unsigned long startTime;
+const unsigned long runDuration = 10000;
+
+Servo myServo; 
+
+float xsample = 0, ysample = 0, zsample = 0;
+unsigned long start;
+int buz = 0;
+
+#define samples 50
+#define maxVal 200
+#define minVal -200
+#define buzTime 5000
+
+void setup() {
+  lcd.begin(16, 2);
+  Serial.begin(9600);
+  Wire.begin();
+
+  lcd.print("Earthquake ");
+  lcd.setCursor(0, 1);
+  lcd.print("Detector ");
+  delay(2000);
+  lcd.clear();
+  lcd.print("Calibrating.....");
+  lcd.setCursor(0, 1);
+  lcd.print("Please wait...");
+
+  pinMode(buzzer, OUTPUT);
+  pinMode(led, OUTPUT);
+  pinMode(buttonPin, INPUT);
+  digitalWrite(led, LOW);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  myServo.attach(servoPin); 
+  myServo.write(90);
+
+  mySensor.setWire(&Wire);
+  mySensor.beginAccel();
+
+  // Calibration
+  Serial.println("Calibration Started...");
+  float ax, ay, az;
+  for (int i = 0; i < samples; i++) {
+    mySensor.accelUpdate();
+    ax = mySensor.accelX();
+    ay = mySensor.accelY();
+    az = mySensor.accelZ();
+    xsample += ax;
+    ysample += ay;
+    zsample += az;
+    delay(50);
+  }
+  xsample /= samples;
+  ysample /= samples;
+  zsample /= samples;
+
+  lcd.clear();
+  lcd.print("Calibrated");
+  delay(1000);
+  lcd.clear();
+  lcd.print("Device Ready");
+  delay(1000);
+  lcd.clear();
+  lcd.print(" X    Y    Z ");
+}
+
+void loop() {
+  mySensor.accelUpdate();
+
+  float ax = mySensor.accelX() - xsample;
+  float ay = mySensor.accelY() - ysample;
+  float az = mySensor.accelZ() - zsample;
+
+  int xValue = (int)(ax * 1000);
+  int yValue = (int)(ay * 1000);
+  int zValue = (int)(az * 1000);
+
+  int magnitude = sqrt((long)xValue * xValue + (long)yValue * yValue + (long)zValue * zValue);
+
+  if (xValue < minVal || xValue > maxVal || yValue < minVal || yValue > maxVal || zValue < minVal || zValue > maxVal) {
+    if (buz == 0) {
+      start = millis();
+      buz = 1;
+      Serial.println("Earthquake Detected!");
+      lcd.clear();
+      lcd.print("Earthquake !!!!");
+    }
+
+    lcd.setCursor(0, 1); 
+    lcd.print(padValue(xValue));
+    lcd.setCursor(6, 1);
+    lcd.print(padValue(yValue));
+    lcd.setCursor(11, 1);
+    lcd.print(padValue(zValue));
+
+    Serial.print("EQ: X: "); Serial.print(xValue);
+    Serial.print(" | Y: "); Serial.print(yValue);
+    Serial.print(" | Z: "); Serial.print(zValue);
+    Serial.print(" | Magnitude: "); Serial.println(magnitude);
+
+    digitalWrite(led, HIGH);
+    tone(buzzer, 1000);
+
+   
+    for (int angle = 90; angle > 0; angle--) {
+      myServo.write(angle);
+      delay(28); 
+    }
+
+    startTime = millis();
+
+    while (millis() - startTime < runDuration) {
+      digitalWrite(TRIG_PIN, LOW);
+      delayMicroseconds(2);
+      digitalWrite(TRIG_PIN, HIGH);
+      delayMicroseconds(10);
+      digitalWrite(TRIG_PIN, LOW);
+      
+      // Read echo time
+      duration = pulseIn(ECHO_PIN, HIGH);
+      distance = duration * 0.034 / 2;  // cm
+
+      Serial.print("Distance: ");
+      Serial.println(distance);
+
+      // Detect movement if distance changes significantly
+      if (abs(distance - previousDistance) > 5 && printDetectedOnce) {
+        Serial.println("MOTION DETECTED - Possible Object or Human Movement");
+        lcd.clear();
+        lcd.print("MOTION DETECTED");
+        printDetectedOnce = false;
+      }
+
+      previousDistance = distance;
+      delay(500);
+    }
+
+    
+    myServo.write(90);
+    printDetectedOnce = true;
+    buz = 0;
+    noTone(buzzer);
+    digitalWrite(led, LOW);
+    Serial.println("Alert Deactivated");
+    lcd.clear();
+    lcd.print(" X    Y    Z ");
+    return;
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print(padValue(xValue));
+  lcd.setCursor(6, 1);
+  lcd.print(padValue(yValue));
+  lcd.setCursor(11, 1);
+  lcd.print(padValue(zValue));
+
+  Serial.print("Normal: X: "); Serial.print(xValue);
+  Serial.print(" | Y: "); Serial.print(yValue);
+  Serial.print(" | Z: "); Serial.print(zValue);
+  Serial.print(" | Magnitude: "); Serial.println(magnitude);
+
+  delay(150);
+}
+
+String padValue(int value) {
+  String strValue = String(value);
+  while (strValue.length() < 4) strValue += " ";
+  return strValue.substring(0, 4);
+}
