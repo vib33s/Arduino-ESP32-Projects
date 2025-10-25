@@ -1,1 +1,137 @@
+#include <Wire.h>
+#include <RTClib.h>
+#include <MPU9250_asukiaaa.h>
+#include <Stepper.h>
+#include <SoftwareSerial.h>
+#include <DFRobotDFPlayerMini.h>
+
+const int stepsPerRevolution = 32 * 64;
+const int trigPin = 6;
+const int echoPin = 7;
+
+long duration;
+int distance;
+int minDistance = 5;
+int maxDistance = 100;
+int minSpeed = 5;
+int maxSpeed = 15;
+
+Stepper myStepper(stepsPerRevolution, 8, 10, 9, 11);
+MPU9250_asukiaaa mySensor;
+RTC_DS3231 rtc;
+
+int stepCount = 0;
+unsigned long lastStepTime = 0;
+int lastResetDay = -1;
+
+float fallThreshold = 2.5;     
+float stepThreshold = 1.15;    
+bool fallDetected = false;
+
+SoftwareSerial mySoftwareSerial(2, 3); // RX, TX
+DFRobotDFPlayerMini myDFPlayer;
+bool dfPlayerReady = false;
+
+void setup() {
+  Serial.begin(9600);
+  mySoftwareSerial.begin(9600);
+  Wire.begin();
+
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  myStepper.setSpeed(maxSpeed);
+
+  mySensor.setWire(&Wire);
+  mySensor.beginAccel();
+
+  if (!rtc.begin()) {
+    Serial.println("Couldn't find RTC"); 
+  }
+  if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  if (!myDFPlayer.begin(mySoftwareSerial)) {
+    Serial.println("DFPlayer Mini not found");
+  } else {
+    dfPlayerReady = true;
+    myDFPlayer.volume(25);  
+  }
+
+  Serial.println("Setup complete");
+}
+
+void speakNumber(int number) {
+  if (!dfPlayerReady) return;
+
+  // Convert number to individual digits and play corresponding mp3s
+  String numStr = String(number);
+  for (int i = 0; i < numStr.length(); i++) {
+    int digit = numStr.charAt(i) - '0';
+    myDFPlayer.play(digit);      
+    delay(700); // wait between digits
+  }
+
+  myDFPlayer.play(10);           
+}
+
+void loop() {
+  // Ultrasonic
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  duration = pulseIn(echoPin, HIGH);
+  distance = duration * 0.034 / 2;
+
+  int mappedSpeed = map(distance, minDistance, maxDistance, minSpeed, maxSpeed);
+  mappedSpeed = constrain(mappedSpeed, minSpeed, maxSpeed);
+  myStepper.setSpeed(mappedSpeed);
+  myStepper.step(stepsPerRevolution / 100);
+
+  // Accelerometer
+  mySensor.accelUpdate();
+  float ax = mySensor.accelX();   
+  float ay = mySensor.accelY();
+  float az = mySensor.accelZ();
+
+  float totalAccel = sqrt(ax * ax + ay * ay + az * az);   
+
+  if (totalAccel > fallThreshold && !fallDetected) {
+    fallDetected = true;
+    if (dfPlayerReady) {
+      myDFPlayer.play(10);  // 0011.mp3 = "HELP"
+    }
+  } else if (totalAccel < 1.5) {
+    fallDetected = false;
+  }
+
+  unsigned long currentTime = millis();
+  if (totalAccel > stepThreshold & (currentTime - lastStepTime > 300)) {
+    stepCount++;
+    lastStepTime = currentTime;
+
+    speakNumber(stepCount); // Speak the step count
+  }
+
+  DateTime now = rtc.now();
+  if (now.day() != lastResetDay) {
+    stepCount = 0;
+    lastResetDay = now.day();
+  }
+
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.print(" cm | Speed: ");
+  Serial.print(mappedSpeed);
+  Serial.print(" rpm | Accel: ");
+  Serial.print(totalAccel, 2);
+  Serial.print(" g | Steps: ");
+  Serial.println(stepCount);
+
+  delay(33);
+}
 
